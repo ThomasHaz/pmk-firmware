@@ -1,0 +1,149 @@
+#include <stdio.h>
+#include <string.h>
+#include "pico/stdlib.h"
+#include "pico/cyw43_arch.h"
+#include "hardware/gpio.h"
+#include "lwip/pbuf.h"
+#include "lwip/udp.h"
+#include "lwip/netif.h"
+#include "lwip/dhcp.h"
+
+#include "config.h"
+#include "protocol.h"
+#include "timer.h"
+
+#define DEVICE_ID DEVICE_LEFT
+#define TEST_MODE 1
+
+static struct udp_pcb *udp_pcb = NULL;
+static keyboard_packet_t tx_packet;
+static bool connected = false;
+
+uint16_t calculate_checksum(const keyboard_packet_t *packet) {
+    uint16_t sum = 0;
+    const uint8_t *data = (const uint8_t *)packet;
+    for (size_t i = 0; i < offsetof(keyboard_packet_t, checksum); i++) {
+        sum += data[i];
+    }
+    return sum;
+}
+
+static void send_key_event(uint8_t row, uint8_t col, bool pressed) {
+    if (!connected || udp_pcb == NULL) return;
+    
+    matrix_state_t matrix;
+    memset(&matrix, 0, sizeof(matrix));
+    
+    if (pressed) {
+        matrix.rows[row] = (1 << col);
+        matrix.changed_mask[row] = (1 << col);
+    } else {
+        matrix.rows[row] = 0;
+        matrix.changed_mask[row] = (1 << col);
+    }
+    
+    tx_packet.type = PACKET_MATRIX_UPDATE;
+    tx_packet.device_id = DEVICE_ID;
+    tx_packet.timestamp = timer_read();
+    memcpy(tx_packet.data, &matrix, sizeof(matrix));
+    tx_packet.checksum = calculate_checksum(&tx_packet);
+    
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, sizeof(tx_packet), PBUF_RAM);
+    if (p != NULL) {
+        memcpy(p->payload, &tx_packet, sizeof(tx_packet));
+        
+        ip_addr_t dongle_addr;
+        ipaddr_aton(DONGLE_IP, &dongle_addr);
+        udp_sendto(udp_pcb, p, &dongle_addr, KB_PORT);
+        
+        pbuf_free(p);
+    }
+}
+
+int main() {
+    stdio_init_all();
+    sleep_ms(1000);
+    
+    printf("\n=== Left Half (WiFi Infrastructure) ===\n");
+    
+    // Init WiFi
+    if (cyw43_arch_init()) {
+        printf("WiFi init failed\n");
+        while(1) sleep_ms(1000);
+    }
+    
+    cyw43_arch_enable_sta_mode();
+    
+    printf("Connecting to: %s\n", WIFI_SSID);
+    if (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASS,
+                                           CYW43_AUTH_WPA2_AES_PSK, 15000)) {
+        printf("Connection FAILED\n");
+        while(1) {
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+            sleep_ms(100);
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+            sleep_ms(100);
+        }
+    }
+    
+    printf("WiFi connected!\n");
+    
+    // Set static IP
+    ip4_addr_t ip, mask, gw;
+    ipaddr_aton(LEFT_IP, &ip);
+    IP4_ADDR(&mask, 255, 255, 128, 0);
+    ipaddr_aton(LEFT_IP, &gw);
+    gw.addr = (gw.addr & 0xFFFFFF00) | 0x01;
+    
+    struct netif *netif = &cyw43_state.netif[CYW43_ITF_STA];
+    dhcp_stop(netif);
+    netif_set_addr(netif, &ip, &mask, &gw);
+    
+    printf("IP: %s\n", LEFT_IP);
+    
+    sleep_ms(500);
+    
+    // Setup UDP
+    udp_pcb = udp_new();
+    if (udp_pcb != NULL) {
+        udp_bind(udp_pcb, IP_ADDR_ANY, KB_PORT);
+        connected = true;
+        printf("UDP ready\n");
+    }
+    
+    printf("\n=== Ready ===\n\n");
+    
+#if TEST_MODE
+    uint32_t last_keystroke = 0;
+    bool keystroke_pressed = false;
+    uint32_t last_blink = 0;
+    bool blink_state = false;
+    
+    while (1) {
+        uint32_t now = timer_read();
+        
+        // Blink LED
+        if (now - last_blink > 500) {
+            blink_state = !blink_state;
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, blink_state);
+            last_blink = now;
+        }
+        
+        // Send 'A' every 2 seconds
+        if (now - last_keystroke > 2000) {
+            printf("Sending 'A' PRESS\n");
+            send_key_event(1, 1, true);
+            keystroke_pressed = true;
+            last_keystroke = now;
+        } else if (keystroke_pressed && now - last_keystroke > 100) {
+            printf("Sending 'A' RELEASE\n");
+            send_key_event(1, 1, false);
+            keystroke_pressed = false;
+        }
+        
+        sleep_ms(10);
+    }
+#endif
+    
+    return 0;
+}
