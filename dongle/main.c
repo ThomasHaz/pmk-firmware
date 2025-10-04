@@ -23,6 +23,8 @@ typedef struct {
     matrix_state_t right_matrix;
     uint32_t left_last_seen;
     uint32_t right_last_seen;
+    uint16_t left_last_sequence;
+    uint16_t right_last_sequence;
 } dongle_state_t;
 
 static dongle_state_t state = {0};
@@ -50,25 +52,44 @@ static void process_matrix_update(uint8_t device_id, matrix_state_t *matrix) {
     matrix_state_t *target = (device_id == DEVICE_LEFT) ? 
                             &state.left_matrix : &state.right_matrix;
     
+    // Clear ALL keys from this half first
     for (uint8_t row = 0; row < MATRIX_ROWS; row++) {
-        if (matrix->changed_mask[row]) {
-            uint8_t old_row = target->rows[row];
-            uint8_t new_row = matrix->rows[row];
-            uint8_t changes = old_row ^ new_row;
-            
-            for (uint8_t col = 0; col < MATRIX_COLS; col++) {
-                if (changes & (1 << col)) {
-                    bool pressed = new_row & (1 << col);
-                    uint8_t actual_col = (device_id == DEVICE_RIGHT) ? 
-                                        col + MATRIX_COLS : col;
-                    
-                    // Use full keymap processing with all features
-                    process_key_event(row, actual_col, pressed);
-                }
+        uint8_t old_row = target->rows[row];
+        
+        // Release any keys that were pressed before
+        for (uint8_t col = 0; col < MATRIX_COLS; col++) {
+            if (old_row & (1 << col)) {
+                uint8_t actual_col = (device_id == DEVICE_RIGHT) ? 
+                                    col + MATRIX_COLS : col;
+                
+                uint8_t layer = get_highest_layer();
+                uint16_t keycode = get_keycode_at(layer, row, actual_col);
+                unregister_key(keycode);
             }
-            target->rows[row] = new_row;
         }
     }
+    
+    // Now press all currently active keys
+    for (uint8_t row = 0; row < MATRIX_ROWS; row++) {
+        uint8_t new_row = matrix->rows[row];
+        
+        for (uint8_t col = 0; col < MATRIX_COLS; col++) {
+            if (new_row & (1 << col)) {
+                uint8_t actual_col = (device_id == DEVICE_RIGHT) ? 
+                                    col + MATRIX_COLS : col;
+                
+                uint8_t layer = get_highest_layer();
+                uint16_t keycode = get_keycode_at(layer, row, actual_col);
+                register_key(keycode);
+            }
+        }
+        
+        // Update state
+        target->rows[row] = new_row;
+    }
+    
+    // Send HID report with new state
+    send_hid_report();
     
     uint32_t now = timer_read();
     if (device_id == DEVICE_LEFT) {
@@ -90,9 +111,16 @@ static void udp_recv_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p,
             pbuf_copy_partial(p, &rx_packet, sizeof(keyboard_packet_t), 0);
             
             if (validate_packet_checksum(&rx_packet)) {
-                if (rx_packet.type == PACKET_MATRIX_UPDATE) {
+                // Check for duplicate packets using sequence number
+                uint16_t *last_seq = (rx_packet.device_id == DEVICE_LEFT) ? 
+                                     &state.left_last_sequence : &state.right_last_sequence;
+                
+                bool is_duplicate = (rx_packet.sequence == *last_seq);
+                
+                if (rx_packet.type == PACKET_MATRIX_UPDATE && !is_duplicate) {
                     process_matrix_update(rx_packet.device_id, 
                                         (matrix_state_t *)rx_packet.data);
+                    *last_seq = rx_packet.sequence;
                 } else if (rx_packet.type == PACKET_HEARTBEAT) {
                     uint32_t now = timer_read();
                     if (rx_packet.device_id == DEVICE_LEFT) {
@@ -105,7 +133,7 @@ static void udp_recv_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p,
         }
         pbuf_free(p);
         
-        sleep_ms(10);
+        sleep_ms(1);
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
     }
 }

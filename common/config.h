@@ -7,7 +7,7 @@
 // Hardware Configuration
 #define MATRIX_ROWS 4
 #define MATRIX_COLS 6
-#define DEBOUNCE_MS 5
+#define DEBOUNCE_MS 10  // Increased for better stability
 
 // Network Configuration - AP MODE
 // The dongle creates an access point, keyboard halves connect to it
