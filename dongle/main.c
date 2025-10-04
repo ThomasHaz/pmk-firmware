@@ -25,6 +25,8 @@ typedef struct {
     uint32_t right_last_seen;
     uint16_t left_last_sequence;
     uint16_t right_last_sequence;
+    bool left_connected;
+    bool right_connected;
 } dongle_state_t;
 
 static dongle_state_t state = {0};
@@ -52,50 +54,109 @@ static void process_matrix_update(uint8_t device_id, matrix_state_t *matrix) {
     matrix_state_t *target = (device_id == DEVICE_LEFT) ? 
                             &state.left_matrix : &state.right_matrix;
     
-    // Clear ALL keys from this half first
+    // Process only the CHANGES, not the entire matrix
     for (uint8_t row = 0; row < MATRIX_ROWS; row++) {
         uint8_t old_row = target->rows[row];
-        
-        // Release any keys that were pressed before
-        for (uint8_t col = 0; col < MATRIX_COLS; col++) {
-            if (old_row & (1 << col)) {
-                uint8_t actual_col = (device_id == DEVICE_RIGHT) ? 
-                                    col + MATRIX_COLS : col;
-                
-                uint8_t layer = get_highest_layer();
-                uint16_t keycode = get_keycode_at(layer, row, actual_col);
-                unregister_key(keycode);
-            }
-        }
-    }
-    
-    // Now press all currently active keys
-    for (uint8_t row = 0; row < MATRIX_ROWS; row++) {
         uint8_t new_row = matrix->rows[row];
         
+        // Use the changed_mask if provided, otherwise calculate it
+        uint8_t changed = matrix->changed_mask[row];
+        if (changed == 0) {
+            changed = old_row ^ new_row;
+        }
+        
+        if (changed == 0) continue; // No changes in this row
+        
         for (uint8_t col = 0; col < MATRIX_COLS; col++) {
-            if (new_row & (1 << col)) {
-                uint8_t actual_col = (device_id == DEVICE_RIGHT) ? 
-                                    col + MATRIX_COLS : col;
+            if (!(changed & (1 << col))) continue; // This key didn't change
+            
+            uint8_t actual_col = (device_id == DEVICE_RIGHT) ? 
+                                col + MATRIX_COLS : col;
+            
+            uint8_t layer = get_highest_layer();
+            uint16_t keycode = get_keycode_at(layer, row, actual_col);
+            
+            bool is_pressed = (new_row & (1 << col)) != 0;
+            bool was_pressed = (old_row & (1 << col)) != 0;
+            
+            // Only process if state actually changed
+            if (is_pressed != was_pressed) {
+                // Process through the feature pipeline first
+                if (!process_combo(keycode, is_pressed)) continue;
+                if (!process_tap_dance(keycode, is_pressed, row, actual_col)) continue;
+                if (!process_modtap(keycode, is_pressed, row, actual_col)) continue;
+                if (!process_layer_keycode(keycode, is_pressed)) continue;
+                if (!process_oneshot_layer(keycode, is_pressed)) continue;
                 
-                uint8_t layer = get_highest_layer();
-                uint16_t keycode = get_keycode_at(layer, row, actual_col);
-                register_key(keycode);
+                // Process mouse keycodes
+                if ((keycode & 0xFF00) == 0x7100) {
+                    process_mouse_keycode(keycode, is_pressed);
+                    continue;
+                }
+                
+                // Process auto-clicker keycodes
+                if ((keycode & 0xFF00) == 0x7200) {
+                    process_autoclicker_keycode(keycode, is_pressed);
+                    continue;
+                }
+                
+                // Handle special keycodes
+                if (keycode == RESET && is_pressed) {
+                    clear_keyboard();
+                    send_hid_report();
+                    continue;
+                }
+                
+                // Finally, handle normal keys
+                if (is_pressed) {
+                    register_key(keycode);
+                } else {
+                    unregister_key(keycode);
+                }
             }
         }
         
-        // Update state
+        // Update stored state for this row
         target->rows[row] = new_row;
     }
     
-    // Send HID report with new state
+    // Send HID report after processing all changes
     send_hid_report();
     
+    // Update last seen timestamp
     uint32_t now = timer_read();
     if (device_id == DEVICE_LEFT) {
         state.left_last_seen = now;
+        state.left_connected = true;
     } else {
         state.right_last_seen = now;
+        state.right_connected = true;
+    }
+}
+
+static void send_ack_packet(uint8_t device_id, uint16_t sequence) {
+    if (udp_pcb == NULL) return;
+    
+    tx_packet.type = PACKET_SYNC_RESPONSE;
+    tx_packet.device_id = DEVICE_DONGLE;
+    tx_packet.sequence = sequence;
+    tx_packet.timestamp = timer_read();
+    tx_packet.checksum = calculate_checksum(&tx_packet);
+    
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, sizeof(tx_packet), PBUF_RAM);
+    if (p != NULL) {
+        memcpy(p->payload, &tx_packet, sizeof(tx_packet));
+        
+        // Send ACK back to the appropriate half
+        ip_addr_t target_addr;
+        if (device_id == DEVICE_LEFT) {
+            ipaddr_aton(LEFT_IP, &target_addr);
+        } else {
+            ipaddr_aton(RIGHT_IP, &target_addr);
+        }
+        
+        udp_sendto(udp_pcb, p, &target_addr, KB_PORT);
+        pbuf_free(p);
     }
 }
 
@@ -104,37 +165,51 @@ static void udp_recv_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     (void)arg; (void)pcb; (void)addr; (void)port;
     
     if (p != NULL) {
-        // Flash LED to show we received something
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
-        
         if (p->tot_len >= sizeof(keyboard_packet_t)) {
             pbuf_copy_partial(p, &rx_packet, sizeof(keyboard_packet_t), 0);
             
             if (validate_packet_checksum(&rx_packet)) {
-                // Check for duplicate packets using sequence number
-                uint16_t *last_seq = (rx_packet.device_id == DEVICE_LEFT) ? 
-                                     &state.left_last_sequence : &state.right_last_sequence;
-                
-                bool is_duplicate = (rx_packet.sequence == *last_seq);
-                
-                if (rx_packet.type == PACKET_MATRIX_UPDATE && !is_duplicate) {
-                    process_matrix_update(rx_packet.device_id, 
-                                        (matrix_state_t *)rx_packet.data);
-                    *last_seq = rx_packet.sequence;
+                if (rx_packet.type == PACKET_MATRIX_UPDATE) {
+                    // Check sequence number to avoid processing duplicates
+                    uint16_t *last_seq = (rx_packet.device_id == DEVICE_LEFT) ? 
+                                        &state.left_last_sequence : 
+                                        &state.right_last_sequence;
+                    
+                    // Allow for some out-of-order packets (sequence within 10 of last)
+                    int16_t seq_diff = (int16_t)(rx_packet.sequence - *last_seq);
+                    
+                    if (seq_diff > 0 || seq_diff < -100) {
+                        // New packet or very old packet (likely wrapped around)
+                        process_matrix_update(rx_packet.device_id, 
+                                            (matrix_state_t *)rx_packet.data);
+                        *last_seq = rx_packet.sequence;
+                        
+                        // Send ACK back
+                        send_ack_packet(rx_packet.device_id, rx_packet.sequence);
+                        
+                        // Very brief LED flash for feedback
+                        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+                        sleep_us(100);
+                        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+                    }
+                    // else: duplicate or slightly out-of-order, still send ACK
+                    else {
+                        send_ack_packet(rx_packet.device_id, rx_packet.sequence);
+                    }
+                    
                 } else if (rx_packet.type == PACKET_HEARTBEAT) {
                     uint32_t now = timer_read();
                     if (rx_packet.device_id == DEVICE_LEFT) {
                         state.left_last_seen = now;
+                        state.left_connected = true;
                     } else if (rx_packet.device_id == DEVICE_RIGHT) {
                         state.right_last_seen = now;
+                        state.right_connected = true;
                     }
                 }
             }
         }
         pbuf_free(p);
-        
-        sleep_ms(1);
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
     }
 }
 
@@ -152,7 +227,7 @@ int main() {
     // Wait for USB enumeration with continuous task polling
     printf("2. Waiting for USB enumeration...\n");
     uint32_t start = to_ms_since_boot(get_absolute_time());
-    while (!tud_mounted() && (to_ms_since_boot(get_absolute_time()) - start) < 10000) {
+    while (!tud_mounted() && (to_ms_since_boot(get_absolute_time()) - start) < 5000) {
         tud_task();
         sleep_ms(1);
     }
@@ -164,9 +239,9 @@ int main() {
     }
     
     // Keep USB task running during stabilization
-    printf("3. Stabilizing USB connection (keeping tud_task running)...\n");
+    printf("3. Stabilizing USB connection...\n");
     start = to_ms_since_boot(get_absolute_time());
-    while ((to_ms_since_boot(get_absolute_time()) - start) < 3000) {
+    while ((to_ms_since_boot(get_absolute_time()) - start) < 1000) {
         tud_task();
         sleep_ms(1);
     }
@@ -224,14 +299,14 @@ int main() {
     
     // Give network stack time to stabilize while keeping USB alive
     start = to_ms_since_boot(get_absolute_time());
-    while ((to_ms_since_boot(get_absolute_time()) - start) < 2000) {
+    while ((to_ms_since_boot(get_absolute_time()) - start) < 1000) {
         tud_task();
         cyw43_arch_poll();
         sleep_ms(1);
     }
     
     // Setup UDP
-    printf("11. Setting up UDP...\n");
+    printf("9. Setting up UDP...\n");
     udp_pcb = udp_new();
     if (udp_pcb != NULL && udp_bind(udp_pcb, IP_ADDR_ANY, KB_PORT) == ERR_OK) {
         udp_recv(udp_pcb, udp_recv_callback, NULL);
@@ -267,49 +342,77 @@ int main() {
     }
     
     printf("\n=== Dongle ready! Waiting for keyboard halves... ===\n");
-    printf("Testing USB HID by sending 'X' once...\n");
     
-    // Test that USB HID actually works
-    sleep_ms(2000);
-    // register_key(KC_X);
-    // send_hid_report();
-    // sleep_ms(100);
-    // unregister_key(KC_X);
-    // send_hid_report();
-    
-    printf("If you saw 'X' appear, USB HID is working!\n\n");
+    // Initialize state
+    memset(&state, 0, sizeof(state));
     
     uint32_t last_status_check = 0;
+    uint32_t last_usb_check = 0;
+    uint32_t last_feature_task = 0;
     
     // Main loop - USB TASK MUST BE FIRST
     while (1) {
-        // USB task is highest priority
+        uint32_t now = timer_read();
+        
+        // USB task is highest priority - run frequently
         tud_task();
         
         // WiFi polling for AP mode
         cyw43_arch_poll();
         
-        uint32_t now = timer_read();
-        
-        // HID and feature processing
+        // Send HID reports if needed
         send_hid_report();
-        mouse_task();
-        autoclicker_task();
-        modtap_task();
-        tap_dance_task();
-        oneshot_task();
+        
+        // Run feature tasks periodically (every 5ms)
+        if (now - last_feature_task > 5) {
+            mouse_task();
+            autoclicker_task();
+            modtap_task();
+            tap_dance_task();
+            oneshot_task();
+            last_feature_task = now;
+        }
+        
+        // Check for disconnected halves (timeout after 2 seconds)
+        if (state.left_connected && (now - state.left_last_seen > 2000)) {
+            state.left_connected = false;
+            // Clear any stuck keys from left half
+            for (uint8_t row = 0; row < MATRIX_ROWS; row++) {
+                for (uint8_t col = 0; col < MATRIX_COLS; col++) {
+                    if (state.left_matrix.rows[row] & (1 << col)) {
+                        uint8_t layer = get_highest_layer();
+                        uint16_t keycode = get_keycode_at(layer, row, col);
+                        unregister_key(keycode);
+                    }
+                }
+                state.left_matrix.rows[row] = 0;
+            }
+            send_hid_report();
+            printf("Left half disconnected - cleared keys\n");
+        }
+        
+        if (state.right_connected && (now - state.right_last_seen > 2000)) {
+            state.right_connected = false;
+            // Clear any stuck keys from right half
+            for (uint8_t row = 0; row < MATRIX_ROWS; row++) {
+                for (uint8_t col = 0; col < MATRIX_COLS; col++) {
+                    if (state.right_matrix.rows[row] & (1 << col)) {
+                        uint8_t layer = get_highest_layer();
+                        uint16_t keycode = get_keycode_at(layer, row, col + MATRIX_COLS);
+                        unregister_key(keycode);
+                    }
+                }
+                state.right_matrix.rows[row] = 0;
+            }
+            send_hid_report();
+            printf("Right half disconnected - cleared keys\n");
+        }
         
         // LED status indicator every 2 seconds
         if (now - last_status_check > 2000) {
             last_status_check = now;
             
-            uint32_t left_age = now - state.left_last_seen;
-            uint32_t right_age = now - state.right_last_seen;
-            
-            bool left_connected = (left_age < 2000);
-            bool right_connected = (right_age < 2000);
-            
-            if (left_connected && right_connected) {
+            if (state.left_connected && state.right_connected) {
                 // Both connected - 2 quick blinks
                 for (int i = 0; i < 2; i++) {
                     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
@@ -317,7 +420,7 @@ int main() {
                     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
                     sleep_ms(100);
                 }
-            } else if (left_connected || right_connected) {
+            } else if (state.left_connected || state.right_connected) {
                 // One connected - 1 blink
                 cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
                 sleep_ms(200);
@@ -330,7 +433,8 @@ int main() {
             }
         }
         
-        sleep_ms(1);
+        // Small consistent delay
+        sleep_us(1000);  // 1ms = 1000 Hz loop rate
     }
     
     return 0;
