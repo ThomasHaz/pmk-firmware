@@ -46,12 +46,12 @@ rm -rf build/dongle build/left build/right
 # Create build directories
 mkdir -p build/dongle build/left build/right
 
-# # Build dongle
-# echo -e "${GREEN}Building Dongle...${NC}"
-# cd build/dongle
-# cmake ../../dongle -DPICO_BOARD=pico2_w -DCMAKE_BUILD_TYPE=Release
-# make -j$(nproc)
-# cd ../..
+# Build dongle
+echo -e "${GREEN}Building Dongle...${NC}"
+cd build/dongle
+cmake ../../dongle -DPICO_BOARD=pico2_w -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+cd ../..
 
 # Build left half
 echo -e "${GREEN}Building Left Half...${NC}"
