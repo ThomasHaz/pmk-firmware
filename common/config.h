@@ -9,17 +9,17 @@
 #define MATRIX_COLS 6
 #define DEBOUNCE_MS 5
 
-// // Network Configuration - INFRASTRUCTURE MODE
-// // All devices connect to your home WiFi
-#define WIFI_SSID "MY_NETWORK"     // Replace with your WiFi name
-#define WIFI_PASS "NET_PASS" // Replace with your WiFi password
+// Network Configuration - AP MODE
+// The dongle creates an access point, keyboard halves connect to it
+#define WIFI_SSID "KBSPLIT"
+#define WIFI_PASS "keyboard"  // Simple 8-char password
+#define WIFI_CHANNEL 6             // Fixed channel 1-11
 
-// Static IP addresses (on your home network)
-// Choose IPs that won't conflict with other devices
-#define DONGLE_IP "172.16.13.10"  // Change to match your network (192.168.1.x or 192.168.0.x)
-#define LEFT_IP   "172.16.13.11"
-#define RIGHT_IP  "172.16.13.12"
-
+// IP Configuration for AP mode
+#define DONGLE_IP "192.168.4.1"    // AP gateway address
+#define LEFT_IP   "192.168.4.2"
+#define RIGHT_IP  "192.168.4.3"
+#define SUBNET_MASK "255.255.255.0"
 
 #define KB_PORT 4242
 #define PACKET_TIMEOUT_MS 1000
@@ -35,7 +35,6 @@
 #define MAX_MODTAP_KEYS 8
 
 // Pin Definitions for Matrix (GPIO pins)
-// GPIO 0 & 1 can be used for matrix since we're using WiFi instead of UART
 #define ROW_PINS {2, 3, 4, 5}
 #define COL_PINS {10, 11, 12, 13, 14, 15}
 

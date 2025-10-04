@@ -12,6 +12,7 @@
 // Define layers
 enum layers {
     _BASE,
+    _QWERT,
     _LOWER,
     _RAISE,
     _ADJUST,
@@ -35,6 +36,14 @@ enum custom_keycodes {
 // Keymap - 4 rows x 12 columns (6 per half)
 const uint16_t keymaps[][MATRIX_ROWS][MATRIX_COLS * 2] = {
     [_BASE] = {
+        // Left Half                                    // Right Half
+        {KC_A, KC_B, KC_C, KC_D, KC_E, KC_F,       KC_Y,    KC_U,    KC_I,    KC_O,    KC_P,    KC_BSPC},
+        {KC_G, KC_H, KC_I, KC_J, KC_K, KC_L,              KC_H,    KC_J,    KC_K,    KC_L,    KC_SCLN, KC_QUOT},
+        {KC_M, KC_N, KC_O, KC_P, KC_Q, KC_R,       KC_N,    KC_M,    KC_COMM, KC_DOT,  KC_SLSH, KC_RSFT},
+        {KC_S, KC_T, KC_U, KC_V, KC_W, KC_X,    KC_ENT, MO(_RAISE), KC_RALT, KC_RGUI, OSL(_ADJUST), TD(TD_ESC_CAPS)}
+    },
+
+    [_QWERT] = {
         // Left Half                                    // Right Half
         {KC_TAB,  KC_Q,    KC_W,    KC_E,    KC_R,    KC_T,       KC_Y,    KC_U,    KC_I,    KC_O,    KC_P,    KC_BSPC},
         {CTL_T(KC_ESC), KC_A, KC_S, KC_D, KC_F, KC_G,              KC_H,    KC_J,    KC_K,    KC_L,    KC_SCLN, KC_QUOT},

@@ -23,6 +23,11 @@ target_compile_definitions(keyboard_left PRIVATE
     PICO_RP2350=1
     CYW43_LWIP=1
     PICO_CYW43_ARCH_POLL=1
+    PICO_STDIO_UART=1
+    PICO_DEFAULT_UART=1
+    PICO_DEFAULT_UART_TX_PIN=8
+    PICO_DEFAULT_UART_RX_PIN=9
+    PICO_DEFAULT_UART_BAUD_RATE=115200
 )
 
 target_link_libraries(keyboard_left
@@ -32,6 +37,8 @@ target_link_libraries(keyboard_left
     hardware_timer
 )
 
+# Enable UART stdio on GPIO 0/1
 pico_enable_stdio_usb(keyboard_left 0)
-pico_enable_stdio_uart(keyboard_left 0)
+pico_enable_stdio_uart(keyboard_left 1)
+
 pico_add_extra_outputs(keyboard_left)
